@@ -1,0 +1,64 @@
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Dependencies
+requirements.txt  # Nếu không muốn push, nhưng nên giữ
+Pipfile.lock
+poetry.lock
+
+# Logs
+logs/
+*.log
+
+# Models (nếu nhạy cảm, hoặc push riêng)
+models/*.pkl  # Exclude pickle models, giữ folder
+
+# IDE/Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database
+*.db
+*.sqlite
+
+# Docker
+.dockerignore
+
+# Misc
+.DS_Store
+.env  # Nếu có file env riêng

@@ -1,0 +1,80 @@
+# =========================================================================
+# CONFIGURATION FILE
+# =========================================================================
+
+# PostgreSQL AI Database
+database:
+  host: localhost
+  port: 5432
+  database: shop_service
+  user: postgres
+  password: 101204
+
+mysql_database:
+  host: localhost
+  port: 3306
+  database: ecommerce_product_db
+  user: root
+  password: 101204
+
+# MySQL Order Database (có reviews)
+mysql_order_database:
+  host: localhost
+  port: 3306
+  database: ecommerce_order_db
+  user: root
+  password: 101204
+
+# Redis Cache
+redis:
+  host: localhost
+  port: 6379
+  db: 0
+  password: null
+
+# Kafka
+kafka:
+  bootstrap_servers:
+    - localhost:9092
+  consumer_group: recommendation-engine
+
+# Model Settings
+model:
+  collaborative_filtering:
+    factors: 64
+    regularization: 0.01
+    iterations: 15
+    training_days: 90
+
+  content_based:
+    text_model: dangvantuan/vietnamese-embedding
+    embedding_dim: 768
+
+# Recommendation Settings
+recommendation:
+  cache_ttl: 3600 # 1 hour
+  default_n: 20
+
+  # Hybrid weights
+  weights:
+    collaborative: 0.70
+    trending: 0.20
+    popular: 0.10
+
+# Batch Job Schedule
+schedule:
+  update_metrics: "02:00" # Daily at 2 AM
+  update_profiles: "03:00" # Daily at 3 AM
+  train_models: "Sunday 02:00" # Weekly
+
+# API Settings
+api:
+  host: 0.0.0.0
+  port: 5000
+  debug: false
+
+# Logging
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: logs/recommendation_engine.log
