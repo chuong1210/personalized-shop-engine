@@ -1,6 +1,8 @@
 -- =========================================================================
 -- SIMPLIFIED AI DATABASE SCHEMA (PostgreSQL)
 -- =========================================================================
+-- docker exec -i postgres psql -U postgres -d shop_service < init_ai_db.sql
+-- Get-Content init_ai_db.sql | docker exec -i postgres psql -U postgres -d shop_service
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "vector"; -- Sửa "pgvector" thành "vector" cho chuẩn với các phiên bản mới
@@ -25,7 +27,9 @@ CREATE TABLE user_interactions (
 CREATE INDEX idx_user_time ON user_interactions (user_id, created_at DESC);
 CREATE INDEX idx_product_interactions ON user_interactions (product_id);
 CREATE INDEX idx_action_type ON user_interactions (action_type);
-CREATE INDEX idx_recent_interactions ON user_interactions (created_at) WHERE created_at > NOW() - INTERVAL '90 days';
+CREATE INDEX idx_recent_interactions 
+ON user_interactions (created_at)
+WHERE created_at::date > CURRENT_DATE - INTERVAL '90 days';
 
 
 -- =========================================================================

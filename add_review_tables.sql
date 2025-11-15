@@ -1,6 +1,9 @@
 -- =========================================================================
 -- DROP ALL EXISTING OBJECTS
 -- =========================================================================
+-- docker exec -i postgres psql -U postgres -d shop_service < add_review_tables.sql
+-- Get-Content add_review_tables.sql | docker exec -i postgres psql -U postgres -d shop_service
+
 DROP VIEW IF EXISTS review_quality_signals;
 DROP FUNCTION IF EXISTS update_product_rating_metrics(VARCHAR);
 DROP FUNCTION IF EXISTS calculate_review_sentiment_score(INT, INT);
