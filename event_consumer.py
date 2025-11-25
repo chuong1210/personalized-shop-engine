@@ -1,362 +1,229 @@
-
 import json
 import logging
-from typing import Dict, Any
+import time
+import signal
+import sys
 from datetime import datetime
+from typing import List, Dict, Any
+
 from kafka import KafkaConsumer
 from kafka.errors import KafkaError
+import psycopg2.extras  # Thư viện quan trọng để bulk insert
 
 from database import Database
 
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
+# Cấu hình điểm số cho các hành động
+ACTION_SCORES = {
+    'view': 1.0,
+    'search': 0.5,
+    'cart_add': 3.0,
+    'cart_remove': -1.0,
+    'wishlist': 2.0,
+    'purchase': 10.0,
+    'click': 0.5
+}
 
-class EventConsumer:
+class BulkEventConsumer:
     """
-    Consumer để xử lý user events từ Kafka
+    Consumer xử lý event theo lô (Batch Processing)
+    - Gom nhiều events lại rồi insert 1 lần vào DB (Tối ưu hiệu năng DB)
+    - Commit offset thủ công (Đảm bảo không mất dữ liệu nếu crash)
     """
     
     def __init__(self, kafka_config: dict, db: Database):
-        """
-        Initialize event consumer
-        
-        Args:
-            kafka_config: Kafka configuration
-            db: Database instance
-        """
         self.db = db
         
-        # Initialize Kafka consumer
+        # Cấu hình Batch
+        self.BATCH_SIZE = 1000       # Gom đủ 1000 events thì ghi
+        self.FLUSH_INTERVAL = 5.0    # Hoặc tối đa 5 giây thì ghi
+        self.buffer: List[Dict] = [] # Vùng nhớ tạm
+        self.last_flush_time = time.time()
+        
+        # Khởi tạo Kafka Consumer
         self.consumer = KafkaConsumer(
             'user-events',  # Topic name
             bootstrap_servers=kafka_config.get('bootstrap_servers', ['localhost:9092']),
-            group_id=kafka_config.get('consumer_group', 'recommendation-engine'),
+            group_id=kafka_config.get('consumer_group', 'recommendation-engine-bulk'),
             value_deserializer=lambda m: json.loads(m.decode('utf-8')),
             auto_offset_reset='earliest',
-            enable_auto_commit=True,
-            max_poll_records=100,
-            session_timeout_ms=30000,
-            heartbeat_interval_ms=10000
+            # QUAN TRỌNG: Tắt auto commit để kiểm soát việc mất dữ liệu
+            enable_auto_commit=False,
+            # Tối ưu fetch
+            fetch_min_bytes=1024, 
+            fetch_max_wait_ms=500
         )
         
-        logger.info("EventConsumer initialized")
-    
+        # Xử lý tín hiệu tắt (Ctrl+C) để flush dữ liệu còn lại
+        signal.signal(signal.SIGINT, self.shutdown)
+        signal.signal(signal.SIGTERM, self.shutdown)
+        self.running = True
+        
+        logger.info(f"BulkEventConsumer initialized. Batch Size: {self.BATCH_SIZE}, Interval: {self.FLUSH_INTERVAL}s")
+
     def start(self):
-        """
-        Start consuming events
-        """
-        logger.info("=" * 60)
-        logger.info("EVENT CONSUMER STARTED")
-        logger.info("Listening for events on topic: user-events")
-        logger.info("=" * 60)
+        """Bắt đầu vòng lặp tiêu thụ tin nhắn"""
+        logger.info("Started consuming events...")
         
         try:
+            # Vòng lặp chính đọc message từ Kafka
             for message in self.consumer:
-                self._process_message(message)
-        except KeyboardInterrupt:
-            logger.info("Consumer stopped by user")
+                if not self.running:
+                    break
+                
+                # 1. Thêm vào bộ đệm
+                event = message.value
+                self.buffer.append(event)
+                
+                # 2. Kiểm tra điều kiện để ghi xuống DB
+                current_time = time.time()
+                is_batch_full = len(self.buffer) >= self.BATCH_SIZE
+                is_time_up = (current_time - self.last_flush_time) >= self.FLUSH_INTERVAL
+                
+                if is_batch_full or is_time_up:
+                    success = self.flush_buffer()
+                    if success:
+                        # 3. Chỉ commit Kafka khi đã ghi DB thành công
+                        self.consumer.commit()
+                        self.last_flush_time = time.time()
+                    else:
+                        # Nếu ghi lỗi, break loop hoặc xử lý retry
+                        # Ở đây ta chọn break để restart container/service nhằm tránh mất data
+                        logger.error("Critical Error: Failed to flush to DB. Stopping consumer.")
+                        break
+                        
         except Exception as e:
-            logger.error(f"Consumer error: {e}")
-            raise
+            logger.error(f"Consumer loop crashed: {e}", exc_info=True)
         finally:
-            self.consumer.close()
-            logger.info("Consumer closed")
-    
-    def _process_message(self, message):
-        """
-        Process a single Kafka message
+            self.close()
+
+    def flush_buffer(self) -> bool:
+        """Ghi dữ liệu từ bộ đệm vào Database"""
+        if not self.buffer:
+            return True
+
+        row_count = len(self.buffer)
+        logger.info(f"Flushing {row_count} events to Database...")
         
-        Args:
-            message: Kafka message
-        """
         try:
-            event = message.value
-            event_type = event.get('event_type')
+            # Chuẩn bị dữ liệu cho execute_values
+            values = []
+            for event in self.buffer:
+                # Tính toán điểm và map dữ liệu
+                action_type = event.get('event_type', 'view')
+                score = event.get('score')
+                
+                # Nếu client không gửi score, tự tính dựa trên config
+                if score is None:
+                    score = ACTION_SCORES.get(action_type, 1.0)
+                
+                # Xử lý thời gian
+                created_at = self._parse_timestamp(event.get('server_timestamp') or event.get('timestamp'))
+                
+                # Tạo tuple tương ứng với các cột trong bảng user_interactions
+                values.append((
+                    event.get('user_id'),
+                    event.get('product_id'),
+                    event.get('shop_id', 'unknown'),
+                    action_type,
+                    float(score),
+                    int(event.get('quantity', 1)),
+                    float(event.get('price', 0)) if event.get('price') else None,
+                    json.dumps(event.get('metadata', {})),
+                    created_at
+                ))
+
+            # Thực hiện Bulk Insert
+            conn = self.db.connect()
+            with conn.cursor() as cur:
+                query = """
+                    INSERT INTO user_interactions 
+                    (user_id, product_id, shop_id, action_type, score, quantity, price, metadata, created_at)
+                    VALUES %s
+                """
+                # execute_values cực nhanh cho việc insert nhiều dòng
+                psycopg2.extras.execute_values(cur, query, values)
             
-            logger.info(f"Processing event: {event_type} from user {event.get('user_id')}")
+            conn.commit()
+            logger.info(f"Successfully inserted {row_count} rows.")
             
-            # Route to appropriate handler
-            if event_type == 'product_view':
-                self._handle_product_view(event)
-            elif event_type == 'product_search':
-                self._handle_search(event)
-            elif event_type == 'cart_add':
-                self._handle_cart_add(event)
-            elif event_type == 'cart_remove':
-                self._handle_cart_remove(event)
-            elif event_type == 'purchase':
-                self._handle_purchase(event)
-            elif event_type == 'recommendation_click':
-                self._handle_recommendation_click(event)
-            else:
-                logger.warning(f"Unknown event type: {event_type}")
-            
+            # Xóa bộ đệm sau khi ghi thành công
+            self.buffer.clear()
+            return True
+
         except Exception as e:
-            logger.error(f"Error processing message: {e}", exc_info=True)
-            # Don't crash the consumer, continue processing
-    
-    def _handle_product_view(self, event: Dict[str, Any]):
-        """
-        Handle product view event
-        
-        Insert into user_interactions table with action_type='view'
-        """
+            logger.error(f"Flush failed: {e}")
+            if 'conn' in locals():
+                conn.rollback()
+            return False
+
+    def _parse_timestamp(self, ts: Any) -> datetime:
+        """Helper để parse thời gian từ nhiều định dạng"""
+        if ts is None:
+            return datetime.now()
         try:
-            self.db.execute("""
-                INSERT INTO user_interactions 
-                (user_id, product_id, shop_id, action_type, score, metadata, created_at)
-                VALUES (%s, %s, %s, 'view', 1.0, %s, %s)
-            """, (
-                event['user_id'],
-                event['product_id'],
-                event['shop_id'],
-                json.dumps({
-                    'duration': event.get('duration', 0),
-                    'source': event.get('source'),
-                    'device_type': event.get('device_type'),
-                    'session_id': event.get('session_id')
-                }),
-                self._parse_timestamp(event.get('timestamp'))
-            ))
-            
-            logger.debug(f"Product view saved: {event['user_id']} -> {event['product_id']}")
-            
-        except Exception as e:
-            logger.error(f"Failed to save product view: {e}")
-    
-    def _handle_search(self, event: Dict[str, Any]):
-        """
-        Handle search event
-        
-        Note: Bạn có thể lưu search history nếu cần,
-        nhưng để đơn giản, ta chỉ log hoặc bỏ qua
-        """
-        try:
-            # Option 1: Just log (đơn giản nhất)
-            logger.info(f"Search: {event['user_id']} searched for '{event['query']}' "
-                       f"({event.get('result_count', 0)} results)")
-            
-            # Option 2: Save to database (nếu cần analyze search behavior)
-            # Bạn có thể tạo bảng user_searches riêng hoặc lưu vào metadata
-            
-        except Exception as e:
-            logger.error(f"Failed to process search event: {e}")
-    
-    def _handle_cart_add(self, event: Dict[str, Any]):
-        """
-        Handle cart add event
-        
-        Insert into user_interactions with action_type='cart_add'
-        """
-        try:
-            self.db.execute("""
-                INSERT INTO user_interactions 
-                (user_id, product_id, shop_id, action_type, score, price, quantity, created_at)
-                VALUES (%s, %s, %s, 'cart_add', 3.0, %s, %s, %s)
-            """, (
-                event['user_id'],
-                event['product_id'],
-                event['shop_id'],
-                event.get('price', 0),
-                event.get('quantity', 1),
-                self._parse_timestamp(event.get('timestamp'))
-            ))
-            
-            logger.debug(f"Cart add saved: {event['user_id']} -> {event['product_id']}")
-            
-        except Exception as e:
-            logger.error(f"Failed to save cart add: {e}")
-    
-    def _handle_cart_remove(self, event: Dict[str, Any]):
-        """
-        Handle cart remove event
-        
-        Insert with action_type='cart_remove' and negative score
-        """
-        try:
-            self.db.execute("""
-                INSERT INTO user_interactions 
-                (user_id, product_id, shop_id, action_type, score, created_at)
-                VALUES (%s, %s, %s, 'cart_remove', -2.0, %s)
-            """, (
-                event['user_id'],
-                event['product_id'],
-                event.get('shop_id', ''),  # Shop ID might not be in remove event
-                self._parse_timestamp(event.get('timestamp'))
-            ))
-            
-            logger.debug(f"Cart remove saved: {event['user_id']} -> {event['product_id']}")
-            
-        except Exception as e:
-            logger.error(f"Failed to save cart remove: {e}")
-    
-    def _handle_purchase(self, event: Dict[str, Any]):
-        """
-        Handle purchase event
-        
-        Insert into user_interactions with action_type='purchase' and high score
-        """
-        try:
-            self.db.execute("""
-                INSERT INTO user_interactions 
-                (user_id, product_id, shop_id, action_type, score, price, quantity, 
-                 metadata, created_at)
-                VALUES (%s, %s, %s, 'purchase', 10.0, %s, %s, %s, %s)
-            """, (
-                event['user_id'],
-                event['product_id'],
-                event['shop_id'],
-                event.get('price', 0),
-                event.get('quantity', 1),
-                json.dumps({
-                    'order_id': event.get('order_id'),
-                    'sku_id': event.get('sku_id')
-                }),
-                self._parse_timestamp(event.get('timestamp'))
-            ))
-            
-            logger.debug(f"Purchase saved: {event['user_id']} -> {event['product_id']}")
-            
-            # Update user profile asynchronously
-            self._update_user_profile(event['user_id'])
-            
-        except Exception as e:
-            logger.error(f"Failed to save purchase: {e}")
-    
-    def _handle_recommendation_click(self, event: Dict[str, Any]):
-        """
-        Handle recommendation click event
-        
-        Update recommendation_logs table
-        """
-        try:
-            # Update the most recent impression for this user-product combo
-            self.db.execute("""
-                UPDATE recommendation_logs
-                SET clicked_at = %s
-                WHERE user_id = %s 
-                AND product_id = %s 
-                AND rec_type = %s
-                AND shown_at >= NOW() - INTERVAL '1 hour'
-                AND clicked_at IS NULL
-                ORDER BY shown_at DESC
-                LIMIT 1
-            """, (
-                self._parse_timestamp(event.get('timestamp')),
-                event['user_id'],
-                event['product_id'],
-                event.get('rec_type', 'unknown')
-            ))
-            
-            logger.debug(f"Recommendation click tracked: {event['user_id']} -> {event['product_id']}")
-            
-        except Exception as e:
-            logger.error(f"Failed to track recommendation click: {e}")
-    
-    def _update_user_profile(self, user_id: str):
-        """
-        Update user profile after purchase
-        
-        Args:
-            user_id: User ID
-        """
-        try:
-            # Recalculate user profile metrics
-            self.db.execute("""
-                INSERT INTO user_profiles (
-                    user_id, 
-                    total_orders, 
-                    total_spent, 
-                    avg_order_value,
-                    last_purchase_at,
-                    profile_updated_at
-                )
-                SELECT 
-                    user_id,
-                    COUNT(DISTINCT DATE(created_at)) as total_orders,
-                    SUM(price * quantity) as total_spent,
-                    AVG(price * quantity) as avg_order_value,
-                    MAX(created_at) as last_purchase_at,
-                    NOW() as profile_updated_at
-                FROM user_interactions
-                WHERE user_id = %s
-                AND action_type = 'purchase'
-                GROUP BY user_id
-                ON CONFLICT (user_id) DO UPDATE SET
-                    total_orders = EXCLUDED.total_orders,
-                    total_spent = EXCLUDED.total_spent,
-                    avg_order_value = EXCLUDED.avg_order_value,
-                    last_purchase_at = EXCLUDED.last_purchase_at,
-                    profile_updated_at = NOW()
-            """, (user_id,))
-            
-            logger.debug(f"User profile updated: {user_id}")
-            
-        except Exception as e:
-            logger.error(f"Failed to update user profile: {e}")
-    
-    def _parse_timestamp(self, timestamp_str: Any) -> datetime:
-        """
-        Parse timestamp from event
-        
-        Args:
-            timestamp_str: Timestamp string or datetime
-            
-        Returns:
-            datetime object
-        """
-        if isinstance(timestamp_str, datetime):
-            return timestamp_str
-        
-        if isinstance(timestamp_str, str):
-            try:
-                # Try ISO format
-                return datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-            except:
-                pass
-        
-        # Default to now
+            # Nếu là số (timestamp từ time.time())
+            if isinstance(ts, (int, float)):
+                return datetime.fromtimestamp(ts)
+            # Nếu là string
+            if isinstance(ts, str):
+                return datetime.fromisoformat(ts.replace('Z', '+00:00'))
+        except:
+            pass
         return datetime.now()
 
+    def shutdown(self, signum, frame):
+        """Xử lý tắt graceful"""
+        logger.info("Received shutdown signal. Flushing remaining events...")
+        self.running = False
+        # Cố gắng flush lần cuối
+        if self.buffer:
+            if self.flush_buffer():
+                self.consumer.commit()
+        sys.exit(0)
+
+    def close(self):
+        self.consumer.close()
+        logger.info("Consumer closed.")
 
 # ============================================================================
 # MAIN RUNNER
 # ============================================================================
 
 def main():
-    """
-    Main function to run event consumer
-    """
     import yaml
+    import os
     
-    # Setup logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler('logs/event_consumer.log'),
-            logging.StreamHandler()
-        ]
-    )
-    
-    # Load config
-    with open('config.yaml', 'r') as f:
+    # Load Config
+    config_path = 'config.yaml'
+    if not os.path.exists(config_path):
+        logger.error("Config file not found!")
+        return
+
+    with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     
-    # Initialize database
-    db = Database(config['database'])
-    
-    # Initialize consumer
-    consumer = EventConsumer(config['kafka'], db)
-    
-    # Start consuming
+    # Init Database
     try:
-        consumer.start()
-    except KeyboardInterrupt:
-        logger.info("Shutting down consumer...")
-    finally:
-        db.close()
+        db = Database(config['database'])
+        # Test connection
+        db.connect()
+    except Exception as e:
+        logger.error(f"Cannot connect to Database: {e}")
+        return
 
+    # Start Consumer
+    consumer = BulkEventConsumer(config['kafka'], db)
+    consumer.start()
 
 if __name__ == '__main__':
     main()

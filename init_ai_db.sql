@@ -204,3 +204,9 @@ INSERT INTO product_features (product_id, category_id, shop_id, current_price, v
 ('prod001', 'cat001', 'shop001', 500000, 150, 10),
 ('prod002', 'cat001', 'shop001', 300000, 80, 5),
 ('prod003', 'cat002', 'shop002', 800000, 200, 15);
+-- Chạy trong PostgreSQL
+ALTER TABLE product_features 
+ADD COLUMN IF NOT EXISTS hybrid_embedding vector(64);
+
+-- Tạo index để tìm kiếm nhanh cho vector mới này
+CREATE INDEX ON product_features USING ivfflat (hybrid_embedding vector_cosine_ops);

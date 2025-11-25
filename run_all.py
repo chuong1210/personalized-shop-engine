@@ -1,6 +1,5 @@
 """
 run_all.py - Complete setup and training pipeline
-Chạy file này để setup toàn bộ hệ thống từ đầu
 """
 
 import os
@@ -92,8 +91,8 @@ def main():
     logger.info(" Directories created")
     steps_status.append(("Create directories", True))
     
-    # Step 2: Check database connection
-    logger.info("\nStep 2: Checking database connections...")
+    # Step 2: Check database connection & Step 2.5: Init Schema
+    logger.info("\nStep 2: Checking database connections and Initializing Schema...")
     try:
         from database import Database, MySQLDatabase
         import yaml
@@ -101,33 +100,59 @@ def main():
         with open('config.yaml', 'r') as f:
             config = yaml.safe_load(f)
         
-        # Test PostgreSQL
+        # Test MySQL
+        mysql_db = MySQLDatabase(config['mysql_database'])
+        mysql_db.connect()
+        logger.info(" MySQL connected")
+        mysql_db.close()
+
+        # Test PostgreSQL & Init Schema
         pg_db = Database(config['database'])
         pg_db.connect()
         pg_db.fetchone("SELECT 1")
         logger.info(" PostgreSQL connected")
         
-        # Test MySQL
-        mysql_db = MySQLDatabase(config['mysql_database'])
-        mysql_db.connect()
-        logger.info(" MySQL connected")
+        # --- NEW: Step 2.5 Initialize AI Database Schema ---
+        logger.info("\nStep 2.5: Initializing Core AI Database Schema...")
         
+        # Check if table 'user_interactions' exists to decide if we need to run init script
+        table_check = pg_db.fetchone("SELECT to_regclass('public.user_interactions')")
+        
+        if not table_check or not table_check[0]:
+            logger.info(" Main tables not found. Executing init_ai_db.sql...")
+            if os.path.exists('init_ai_db.sql'):
+                with open('init_ai_db.sql', 'r', encoding='utf-8') as f:
+                    schema_sql = f.read()
+                pg_db.execute(schema_sql, commit=True)
+                logger.info(" Schema initialized successfully.")
+            else:
+                logger.error(" File init_ai_db.sql not found!")
+                steps_status.append(("Init Schema", False))
+                return
+        else:
+            logger.info(" Core tables already exist. Checking/Updating extensions...")
+            # Run ALTER statements or Extensions explicitly if needed, but the init_ai_db.sql 
+            # (if updated with IF NOT EXISTS) handles idempotent runs too.
+            # For safety, let's run the schema script anyway as it uses IF NOT EXISTS now.
+            if os.path.exists('init_ai_db.sql'):
+                with open('init_ai_db.sql', 'r', encoding='utf-8') as f:
+                    schema_sql = f.read()
+                pg_db.execute(schema_sql, commit=True)
+                logger.info(" Schema update/verification completed.")
+
         pg_db.close()
-        mysql_db.close()
         
-        steps_status.append(("Database connection", True))
+        steps_status.append(("Database connection & Schema", True))
         
     except Exception as e:
-        logger.error(f" Database connection failed: {e}")
-        steps_status.append(("Database connection", False))
+        logger.error(f" Database/Schema setup failed: {e}")
+        steps_status.append(("Database connection & Schema", False))
         return
     
     # Step 3: Add review tables (if not exist)
     logger.info("\nStep 3: Setting up review tables...")
     try:
-        with open('config.yaml', 'r') as f:
-            config = yaml.safe_load(f)
-        
+        # Re-connect
         pg_db = Database(config['database'])
         pg_db.connect()
         
@@ -141,7 +166,7 @@ def main():
         
         if not result[0]:
             logger.info("Creating product_reviews table...")
-            with open('add_review_tables.sql', 'r') as f:
+            with open('add_review_tables.sql', 'r', encoding='utf-8') as f:
                 sql = f.read()
             pg_db.execute(sql, commit=True)
             logger.info(" Review tables created")

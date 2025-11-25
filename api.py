@@ -5,12 +5,22 @@ api.py - Flask REST API for recommendations
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import logging
+import time
 import yaml
 import redis
-
+from kafka import KafkaProducer
+import json
 from database import Database
 from recommend_service import RecommendationService
-
+# 1. Khởi tạo Kafka Producer (Chạy 1 lần khi start app)
+# Lưu ý: Load config từ file hoặc env
+producer = KafkaProducer(
+    bootstrap_servers=['localhost:9093'],
+    value_serializer=lambda x: json.dumps(x).encode('utf-8'),
+    # Tăng tốc độ bắn tin
+    acks=1,  # 0: Không chờ, 1: Chờ Leader nhận, 'all': Chờ tất cả (chậm nhưng an toàn)
+    linger_ms=10  # Gom message trong 10ms rồi gửi 1 thể
+)
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -46,6 +56,38 @@ def init_service():
     logger.info("Service initialized successfully")
 
 
+@app.route('/api/events', methods=['POST'])
+def track_event():
+    """
+    Endpoint nhận hành vi từ Client
+    Body: {
+        "user_id": "u123",
+        "event_type": "view",
+        "product_id": "p456",
+        "metadata": { ... }
+    }
+    """
+    try:
+        data = request.json
+        
+        # Validate cơ bản
+        if not data.get('user_id') or not data.get('event_type'):
+            return jsonify({'error': 'Missing required fields'}), 400
+        
+        # Bổ sung Server Timestamp (để tránh client sai giờ)
+        data['server_timestamp'] = time.time()
+        
+        # 2. Bắn vào Kafka (Async - Rất nhanh)
+        # Không ghi DB ở đây để tránh nghẽn API
+        producer.send('user-events', value=data)
+        
+        return jsonify({'status': 'queued'}), 200
+
+    except Exception as e:
+        logger.error(f"Tracking error: {e}")
+        # Vẫn return 200 hoặc 500 tùy chiến lược, 
+        # nhưng thường tracking lỗi thì client cũng ko làm gì được.
+        return jsonify({'status': 'error', 'msg': str(e)}), 500
 # ============================================================================
 # RECOMMENDATION ENDPOINTS
 # ============================================================================
@@ -93,7 +135,7 @@ def get_personalized():
         recommendations = service.get_personalized_recommendations(
             user_id, n, context
         )
-        
+        # print(recommendations)
         return jsonify({
             'success': True,
             'recommendations': recommendations,

@@ -109,25 +109,28 @@ class RecommendationService:
         """
         # Check cache
         cache_key = f"rec:personalized:{user_id}"
-        cached = self.redis.get(cache_key)
-        if cached:
-            logger.debug(f"Cache hit for user {user_id}")
-            return json.loads(cached)
+        # cached = self.redis.get(cache_key)
+        # if cached:
+        #     logger.debug(f"Cache hit for user {user_id}")
+        #     return json.loads(cached)
         
-        logger.info(f"Generating personalized recommendations for user {user_id}")
+        # logger.info(f"Generating personalized recommendations for user {user_id}")
         
         # 1. Collaborative Filtering (70%)
         cf_recs = self.cf_engine.recommend(user_id, n=n*2)
         cf_dict = {pid: score * self.weights['collaborative'] for pid, score in cf_recs}
         
+        print("cf",cf_dict)
         # 2. Trending products (20%)
         trending = self._get_trending_products(n=20)
         trending_dict = {pid: score * self.weights['trending'] for pid, score in trending}
+        print("trending",trending_dict)
         
         # 3. Popular in favorite categories (10%)
         popular = self._get_popular_in_user_categories(user_id, n=20)
         popular_dict = {pid: score * self.weights['popular'] for pid, score in popular}
-        
+        print("popular",popular_dict)
+
         # Combine scores
         all_products = set(cf_dict.keys()) | set(trending_dict.keys()) | set(popular_dict.keys())
         combined = []
