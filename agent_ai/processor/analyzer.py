@@ -161,7 +161,7 @@ Bắt đầu phân tích:
             
             results = json.loads(result_text.strip())
             
-            print(f"✅ Phân tích thành công {len(results)} messages")
+            print(f" Phân tích thành công {len(results)} messages")
             return results
             
         except json.JSONDecodeError as e:

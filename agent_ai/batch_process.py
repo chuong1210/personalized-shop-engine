@@ -118,7 +118,7 @@ def get_db_connection():
     try:
         connection = mysql.connector.connect(**DB_CONFIG)
         if connection.is_connected():
-            print("✅ Kết nối MySQL thành công!")
+            print(" Kết nối MySQL thành công!")
             return connection
     except Error as e:
         print(f" Lỗi kết nối MySQL: {e}")
@@ -190,7 +190,7 @@ def update_custom_metadata_batch(connection, updates: List[Dict[str, Any]]):
     
     connection.commit()
     cursor.close()
-    print(f"✅ Đã cập nhật {len(updates)} records vào DB")
+    print(f" Đã cập nhật {len(updates)} records vào DB")
 
 # ========================================
 # 🤖 LLM ANALYSIS WITH RETRY
@@ -231,7 +231,7 @@ def analyze_batch_with_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, Any
         
         results = json.loads(response_text.strip())
         
-        print(f"✅ LLM trả về {len(results)} kết quả")
+        print(f" LLM trả về {len(results)} kết quả")
         return results
         
     except Exception as e:
@@ -299,7 +299,7 @@ def process_batch(connection, messages: List[Dict[str, Any]]):
         # Batch update vào DB
         if updates:
             update_custom_metadata_batch(connection, updates)
-            print(f"\n✅ Hoàn thành batch: {len(updates)}/{len(messages)} tin nhắn")
+            print(f"\n Hoàn thành batch: {len(updates)}/{len(messages)} tin nhắn")
         
     except Exception as e:
         print(f"\n Lỗi xử lý batch: {e}")
@@ -326,7 +326,7 @@ def main():
             messages = fetch_unprocessed_messages(connection, BATCH_SIZE)
             
             if not messages:
-                print("\n✅ Đã xử lý xong tất cả tin nhắn!")
+                print("\n Đã xử lý xong tất cả tin nhắn!")
                 break
             
             batch_count += 1

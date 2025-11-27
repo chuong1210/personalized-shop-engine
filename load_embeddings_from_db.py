@@ -150,7 +150,7 @@ def load_embeddings_from_database():
     logger.info(f"Embedding dimension: {stats['embedding_dim']}")
     logger.info(f"Model: {stats['model_name']}")
     
-    logger.info("\n✅ DONE! Embeddings loaded and ready to use.")
+    logger.info("\n DONE! Embeddings loaded and ready to use.")
     logger.info("You can now:")
     logger.info("  1. Run train.py (will skip CB embedding step)")
     logger.info("  2. Run api.py (will load from models/cb_embeddings_latest.pkl)")

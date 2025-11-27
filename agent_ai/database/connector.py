@@ -23,7 +23,7 @@ class MySQLConnection:
         try:
             self.connection = mysql.connector.connect(**self.config)
             self.cursor = self.connection.cursor(dictionary=True)
-            print("✅ Kết nối MySQL thành công!")
+            print(" Kết nối MySQL thành công!")
         except mysql.connector.Error as err:
             print(f" Lỗi kết nối MySQL: {err}")
             raise
@@ -111,7 +111,7 @@ class MySQLConnection:
             self.cursor.executemany(query, data)
             self.connection.commit()
             updated_count = self.cursor.rowcount
-            print(f"✅ Đã cập nhật {updated_count} bản ghi")
+            print(f" Đã cập nhật {updated_count} bản ghi")
             return updated_count
         except mysql.connector.Error as err:
             print(f" Lỗi khi cập nhật: {err}")

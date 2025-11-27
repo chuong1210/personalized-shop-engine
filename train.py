@@ -117,7 +117,7 @@ def train_collaborative_filtering(db: Database, config: dict):
     logger.info(f"Model saved to {model_path}")
     
     # Cache similar products based on Matrix Factorization
-    cache_similar_products(cf_engine, db)
+    # cache_similar_products(cf_engine, db)
     
     return cf_engine
 
@@ -302,43 +302,86 @@ def train_content_based(db: Database, mysql_db: MySQLDatabase, config: dict):
         logger.error(f"CB Training Error: {e}")
         traceback.print_exc()
         return None
-
-
-def cache_similar_products(cf_engine, db):
+def cache_similar_products(cf_engine, cb_engine, db):
     """
-    Cache similar products based on Collaborative Filtering
+    Cache similar products: Ưu tiên CF, nếu không có thì dùng Content-Based (Embedding)
     """
-    if cf_engine is None:
-        return
-        
-    logger.info("Caching similar products to DB (CF-based)...")
+    logger.info("Caching similar products to database (Hybrid Strategy)...")
     
+    # Lấy tất cả sản phẩm
     products = db.query("SELECT product_id FROM product_features")
+    
     if products.empty:
+        logger.warning("No products found in database")
         return
+    
+    cached_count = 0
+    cf_count = 0
+    cb_count = 0
+    
+    # Prepare batch update data
+    updates = []
+    
+    for _, row in products.iterrows():
+        product_id = row['product_id']
+        similar_ids = []
+        source = ""
+
+        # CACH 1: Thử dùng Collaborative Filtering (Hành vi)
+        if cf_engine:
+            try:
+                # Tìm tương đồng dựa trên hành vi người dùng
+                cf_sim = cf_engine.similar_products(product_id, n=20)
+                if cf_sim:
+                    similar_ids = [p[0] for p in cf_sim]
+                    source = "CF"
+                    cf_count += 1
+            except Exception:
+                pass
         
-    count = 0
-    with db.connect() as conn:
-        with conn.cursor() as cur:
-            for _, row in products.iterrows():
-                pid = row['product_id']
-                try:
-                    similar = cf_engine.similar_products(pid, n=20)
-                    if similar:
-                        sim_ids = [p[0] for p in similar]
-                        cur.execute("""
-                            UPDATE product_features 
-                            SET similar_product_ids = %s 
-                            WHERE product_id = %s
-                        """, (sim_ids, pid))
-                        count += 1
-                except:
-                    pass
-            conn.commit()
+        # CACH 2: Nếu CF thất bại (Sản phẩm mới/Cold Start), dùng Content-Based (Embedding)
+        if not similar_ids and cb_engine:
+            try:
+                # Tìm tương đồng dựa trên nội dung (Tên/Mô tả/Hình ảnh)
+                # Lưu ý: Hàm này dùng vector search (như ta đã làm ở các bước trước)
+                cb_sim = cb_engine.find_similar(product_id, n=20)
+                if cb_sim:
+                    similar_ids = [p[0] for p in cb_sim]
+                    source = "CB"
+                    cb_count += 1
+            except Exception:
+                pass
+        
+        # Nếu tìm được (bằng cách này hay cách kia) thì lưu vào DB
+        if similar_ids:
+            updates.append((similar_ids, product_id))
+            cached_count += 1
             
-    logger.info(f"Cached similar products for {count} items.")
+            # Batch update mỗi 100 items
+            if len(updates) >= 100:
+                _batch_update_similar(db, updates)
+                updates = []
+                print(f"Cached {cached_count}/{len(products)} products...", end='\r')
 
+    # Update nốt phần còn lại
+    if updates:
+        _batch_update_similar(db, updates)
+    
+    print("") # Xuống dòng
+    logger.info(f"✅ Finished Caching.")
+    logger.info(f"   - Used Collaborative Filtering (Behavior): {cf_count}")
+    logger.info(f"   - Used Content-Based (Embedding): {cb_count} (Cold Start Fixed)")
 
+def _batch_update_similar(db, data):
+    """Helper để update batch vào DB"""
+    try:
+        db.execute_many("""
+            UPDATE product_features
+            SET similar_product_ids = %s, last_updated = NOW()
+            WHERE product_id = %s
+        """, data)
+    except Exception as e:
+        logger.error(f"Batch update failed: {e}")
 def main():
     logger.info("=" * 70)
     logger.info("AI RECOMMENDATION ENGINE - TRAINING PIPELINE")
@@ -387,6 +430,7 @@ def main():
     except Exception:
         logger.error("CB Training crashed.")
         traceback.print_exc()
+    cache_similar_products(cf_model, cb_model, db)
 
     logger.info("\n" + "=" * 70)
     logger.info("TRAINING COMPLETE")

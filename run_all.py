@@ -57,7 +57,7 @@ def run_python_script(description, script_name):
     try:
         # Import and run
         if script_name == 'migrate_reviews':
-            from migrate_reviews import sync_reviews
+            from create_data.migrate_reviews import sync_reviews
             sync_reviews()
         elif script_name == 'train':
             from train import main as train_main
@@ -93,92 +93,92 @@ def main():
     
     # Step 2: Check database connection & Step 2.5: Init Schema
     logger.info("\nStep 2: Checking database connections and Initializing Schema...")
-    try:
-        from database import Database, MySQLDatabase
-        import yaml
+    # try:
+    #     from database import Database, MySQLDatabase
+    #     import yaml
         
-        with open('config.yaml', 'r') as f:
-            config = yaml.safe_load(f)
+    #     with open('config.yaml', 'r') as f:
+    #         config = yaml.safe_load(f)
         
-        # Test MySQL
-        mysql_db = MySQLDatabase(config['mysql_database'])
-        mysql_db.connect()
-        logger.info(" MySQL connected")
-        mysql_db.close()
+    #     # Test MySQL
+    #     mysql_db = MySQLDatabase(config['mysql_database'])
+    #     mysql_db.connect()
+    #     logger.info(" MySQL connected")
+    #     mysql_db.close()
 
-        # Test PostgreSQL & Init Schema
-        pg_db = Database(config['database'])
-        pg_db.connect()
-        pg_db.fetchone("SELECT 1")
-        logger.info(" PostgreSQL connected")
+    #     # Test PostgreSQL & Init Schema
+    #     pg_db = Database(config['database'])
+    #     pg_db.connect()
+    #     pg_db.fetchone("SELECT 1")
+    #     logger.info(" PostgreSQL connected")
         
-        # --- NEW: Step 2.5 Initialize AI Database Schema ---
-        logger.info("\nStep 2.5: Initializing Core AI Database Schema...")
+    #     # --- NEW: Step 2.5 Initialize AI Database Schema ---
+    #     logger.info("\nStep 2.5: Initializing Core AI Database Schema...")
         
-        # Check if table 'user_interactions' exists to decide if we need to run init script
-        table_check = pg_db.fetchone("SELECT to_regclass('public.user_interactions')")
+    #     # Check if table 'user_interactions' exists to decide if we need to run init script
+    #     table_check = pg_db.fetchone("SELECT to_regclass('public.user_interactions')")
         
-        if not table_check or not table_check[0]:
-            logger.info(" Main tables not found. Executing init_ai_db.sql...")
-            if os.path.exists('init_ai_db.sql'):
-                with open('init_ai_db.sql', 'r', encoding='utf-8') as f:
-                    schema_sql = f.read()
-                pg_db.execute(schema_sql, commit=True)
-                logger.info(" Schema initialized successfully.")
-            else:
-                logger.error(" File init_ai_db.sql not found!")
-                steps_status.append(("Init Schema", False))
-                return
-        else:
-            logger.info(" Core tables already exist. Checking/Updating extensions...")
-            # Run ALTER statements or Extensions explicitly if needed, but the init_ai_db.sql 
-            # (if updated with IF NOT EXISTS) handles idempotent runs too.
-            # For safety, let's run the schema script anyway as it uses IF NOT EXISTS now.
-            if os.path.exists('init_ai_db.sql'):
-                with open('init_ai_db.sql', 'r', encoding='utf-8') as f:
-                    schema_sql = f.read()
-                pg_db.execute(schema_sql, commit=True)
-                logger.info(" Schema update/verification completed.")
+    #     if not table_check or not table_check[0]:
+    #         logger.info(" Main tables not found. Executing init_ai_db.sql...")
+    #         if os.path.exists('init_ai_db.sql'):
+    #             # with open('init_ai_db.sql', 'r', encoding='utf-8') as f:
+    #             #     schema_sql = f.read()
+    #             # pg_db.execute(schema_sql, commit=True)
+    #             logger.info(" Schema initialized successfully.")
+    #         else:
+    #             logger.error(" File init_ai_db.sql not found!")
+    #             steps_status.append(("Init Schema", False))
+    #             return
+    #     else:
+    #         logger.info(" Core tables already exist. Checking/Updating extensions...")
+    #         # Run ALTER statements or Extensions explicitly if needed, but the init_ai_db.sql 
+    #         # (if updated with IF NOT EXISTS) handles idempotent runs too.
+    #         # For safety, let's run the schema script anyway as it uses IF NOT EXISTS now.
+    #         if os.path.exists('init_ai_db.sql'):
+    #             # with open('init_ai_db.sql', 'r', encoding='utf-8') as f:
+    #             #     schema_sql = f.read()
+    #             # pg_db.execute(schema_sql, commit=True)
+    #             logger.info(" Schema update/verification completed.")
 
-        pg_db.close()
+    #     pg_db.close()
         
-        steps_status.append(("Database connection & Schema", True))
+    #     steps_status.append(("Database connection & Schema", True))
         
-    except Exception as e:
-        logger.error(f" Database/Schema setup failed: {e}")
-        steps_status.append(("Database connection & Schema", False))
-        return
+    # except Exception as e:
+    #     logger.error(f" Database/Schema setup failed: {e}")
+    #     steps_status.append(("Database connection & Schema", False))
+    #     return
     
-    # Step 3: Add review tables (if not exist)
-    logger.info("\nStep 3: Setting up review tables...")
-    try:
-        # Re-connect
-        pg_db = Database(config['database'])
-        pg_db.connect()
+    # # Step 3: Add review tables (if not exist)
+    # logger.info("\nStep 3: Setting up review tables...")
+    # try:
+    #     # Re-connect
+    #     pg_db = Database(config['database'])
+    #     pg_db.connect()
         
-        # Check if review table exists
-        result = pg_db.fetchone("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_name = 'product_reviews'
-            )
-        """)
+    #     # Check if review table exists
+    #     result = pg_db.fetchone("""
+    #         SELECT EXISTS (
+    #             SELECT FROM information_schema.tables 
+    #             WHERE table_name = 'product_reviews'
+    #         )
+    #     """)
         
-        if not result[0]:
-            logger.info("Creating product_reviews table...")
-            with open('add_review_tables.sql', 'r', encoding='utf-8') as f:
-                sql = f.read()
-            pg_db.execute(sql, commit=True)
-            logger.info(" Review tables created")
-        else:
-            logger.info(" Review tables already exist")
+    #     if not result[0]:
+    #         logger.info("Creating product_reviews table...")
+    #         with open('add_review_tables.sql', 'r', encoding='utf-8') as f:
+    #             sql = f.read()
+    #         pg_db.execute(sql, commit=True)
+    #         logger.info(" Review tables created")
+    #     else:
+    #         logger.info(" Review tables already exist")
         
-        pg_db.close()
-        steps_status.append(("Setup review tables", True))
+    #     pg_db.close()
+    #     steps_status.append(("Setup review tables", True))
         
-    except Exception as e:
-        logger.error(f" Setup review tables failed: {e}")
-        steps_status.append(("Setup review tables", False))
+    # except Exception as e:
+    #     logger.error(f" Setup review tables failed: {e}")
+    #     steps_status.append(("Setup review tables", False))
     
     # Step 4: Migrate review data
     success = run_python_script("Migrate review data from MySQL", "migrate_reviews")

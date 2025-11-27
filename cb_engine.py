@@ -34,10 +34,10 @@ class ContentBasedEngine:
         logger.info(f"Loading Sentence Transformer model: {model_name}")
         
         # Force CPU để tránh CUDA issues
-        import torch
+        # import torch
         device = 'cpu'
-        if torch.cuda.is_available():
-            logger.info("CUDA available but using CPU for stability")
+        # if torch.cuda.is_available():
+        #     logger.info("CUDA available but using CPU for stability")
         
         self.model = SentenceTransformer(model_name, device=device)
         
