@@ -15,7 +15,7 @@ class VietnameseSentimentAnalyzer:
             truncation=True, 
             max_length=256
         )
-        logger.info("✅ Sentiment Model Loaded!")
+        logger.info(" Sentiment Model Loaded!")
 
     def analyze_batch_hybrid(self, contents, ratings):
         """

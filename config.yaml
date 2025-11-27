@@ -44,7 +44,7 @@ model:
     factors: 64
     regularization: 0.01
     iterations: 15
-    training_days: 90
+    training_days: 365
 
   content_based:
     text_model: dangvantuan/vietnamese-embedding

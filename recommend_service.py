@@ -9,7 +9,9 @@ import redis
 
 from database import Database
 from cf_engine import CollaborativeFilteringEngine
+from cb_engine import ContentBasedEngine
 
+import os
 logger = logging.getLogger(__name__)
 
 
@@ -38,6 +40,19 @@ class RecommendationService:
             regularization=cf_config.get('regularization', 0.01),
             iterations=cf_config.get('iterations', 15)
         )
+
+        # --- BẮT BUỘC THÊM ĐOẠN NÀY ---
+        # Load model đã train từ file (nếu có)
+        model_path = "models/cf_model_latest.pkl"
+        if os.path.exists(model_path):
+            try:
+                logger.info(f"Loading trained CF model from {model_path}...")
+                self.cf_engine.load_model(model_path)
+                logger.info("✅ CF Model loaded successfully!")
+            except Exception as e:
+                logger.error(f"❌ Failed to load CF model: {e}")
+        else:
+            logger.warning("⚠️ No trained model found at models/cf_model_latest.pkl. CF will be empty.")
         
         # Recommendation weights
         self.weights = config.get('recommendation', {}).get('weights', {
@@ -48,6 +63,24 @@ class RecommendationService:
         
         logger.info("RecommendationService initialized")
     
+        try:
+            logger.info("⏳ Loading Content-Based Model (Text Embedding)...")
+            # Load model tiếng Việt (Nặng khoảng 500MB RAM)
+            self.cb_engine = ContentBasedEngine(model_name='dangvantuan/vietnamese-embedding')
+            
+            # Load embeddings đã train trước đó từ file .pkl (Nếu có)
+            # Giúp tìm kiếm nhanh hơn mà không cần query DB
+            import os
+            cb_path = "models/cb_embeddings_latest.pkl"
+            if os.path.exists(cb_path):
+                self.cb_engine.load_embeddings(cb_path)
+                logger.info(f"✅ Loaded {len(self.cb_engine.product_embeddings)} product embeddings from file.")
+            else:
+                logger.warning("⚠️ No pre-computed embeddings found. Will use DB vector search (Slower but works).")
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to load Content-Based Model: {e}")
+            self.cb_engine = None
     def train_cf_model(self, days: int = 90):
         """
         Train collaborative filtering model
@@ -153,8 +186,8 @@ class RecommendationService:
         result = combined[:n]
         
         # Cache for 1 hour
-        cache_ttl = self.config.get('recommendation', {}).get('cache_ttl', 3600)
-        self.redis.setex(cache_key, cache_ttl, json.dumps(result))
+        # cache_ttl = self.config.get('recommendation', {}).get('cache_ttl', 3600)
+        # self.redis.setex(cache_key, cache_ttl, json.dumps(result))
         
         # Log impressions
         self._log_impressions(user_id, result, 'personalized', context)
@@ -192,6 +225,74 @@ class RecommendationService:
         
         return result
     
+    def get_similar_products(self, product_id: str, n: int = 10) -> List[Dict]:
+        """
+        Get similar products (Hybrid: DB Cache -> CF -> Content-Based)
+        """
+        # 1. Thử lấy từ Cache Database (Nhanh nhất)
+        cached_similar = self.db.fetchone("""
+            SELECT similar_product_ids 
+            FROM product_features 
+            WHERE product_id = %s
+        """, (product_id,))
+        
+        if cached_similar and cached_similar[0]:
+            similar_ids = cached_similar[0][:n]
+            # Lấy thêm thông tin giá/ảnh để hiển thị
+            return self._fetch_product_details(similar_ids, reason="Similar (Cache)")
+
+        # 2. Nếu Cache rỗng -> Dùng Content-Based (Vector Search)
+        # Đây là cứu cánh cho sản phẩm mới (Cold Start)
+        logger.info(f"Cache miss for {product_id}. Using Vector Search...")
+        
+        try:
+            # Lấy vector của sản phẩm hiện tại
+            query_vec = self.db.fetchone("""
+                SELECT text_embedding FROM product_features WHERE product_id = %s
+            """, (product_id,))
+            
+            if query_vec and query_vec[0]:
+                vector_str = query_vec[0] # PostgreSQL vector trả về string hoặc list
+                
+                # Tìm kiếm bằng pgvector (Cosine Distance)
+                # Toán tử <=> là khoảng cách cosine
+                similar_rows = self.db.query("""
+                    SELECT product_id, 1 - (text_embedding <=> %s) as score
+                    FROM product_features
+                    WHERE product_id != %s
+                    AND text_embedding IS NOT NULL
+                    ORDER BY text_embedding <=> %s ASC
+                    LIMIT %s
+                """, (vector_str, product_id, vector_str, n))
+                
+                results = []
+                for _, row in similar_rows.iterrows():
+                    results.append({
+                        'product_id': row['product_id'],
+                        'score': float(row['score']),
+                        'reason': 'Content Similarity'
+                    })
+                return results
+                
+        except Exception as e:
+            logger.error(f"Vector search failed: {e}")
+
+        # 3. Fallback cuối cùng: Trả về sản phẩm cùng danh mục
+        logger.info("Vector search failed. Fallback to Category.")
+        cat_products = self.db.query("""
+            SELECT t1.product_id 
+            FROM product_features t1
+            JOIN product_features t2 ON t1.category_id = t2.category_id
+            WHERE t2.product_id = %s AND t1.product_id != %s
+            LIMIT %s
+        """, (product_id, product_id, n))
+        
+        return [{'product_id': r['product_id'], 'score': 0.1, 'reason': 'Same Category'} 
+                for _, r in cat_products.iterrows()]
+
+    def _fetch_product_details(self, product_ids, reason=""):
+        """Helper để format kết quả trả về"""
+        return [{'product_id': pid, 'score': 0.9, 'reason': reason} for pid in product_ids]
     def get_cross_sell(self, product_ids: List[str], n: int = 5) -> List[Dict]:
         """
         Get cross-sell recommendations (frequently bought together)

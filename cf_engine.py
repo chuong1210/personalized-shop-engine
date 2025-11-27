@@ -63,7 +63,8 @@ class CollaborativeFilteringEngine:
             return
         
         logger.info(f"Training CF model with {len(interaction_data)} interactions...")
-        
+        interaction_data['user_id'] = interaction_data['user_id'].astype(str)
+        interaction_data['product_id'] = interaction_data['product_id'].astype(str)
         # Create user and product mappings
         unique_users = interaction_data['user_id'].unique()
         unique_products = interaction_data['product_id'].unique()
@@ -110,8 +111,11 @@ class CollaborativeFilteringEngine:
         Returns:
             List of (product_id, score) tuples, sorted by score descending
         """
+        user_id = str(user_id).strip() 
+
         if user_id not in self.user_map:
-            logger.warning(f"User {user_id} not found in training data")
+            sample_keys = list(self.user_map.keys())[:5]
+            logger.warning(f"User '{user_id}' (type: {type(user_id)}) not found. Available samples: {sample_keys}")
             return []
         
         user_idx = self.user_map[user_id]

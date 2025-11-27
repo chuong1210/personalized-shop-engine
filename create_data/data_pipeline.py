@@ -104,7 +104,7 @@ def get_mysql_order_conn():
 #                 max_length=256,
 #                 device=-1 
 #             )
-#             logger.info("✅ Sentiment Model Loaded.")
+#             logger.info(" Sentiment Model Loaded.")
 #         except Exception as e:
 #             logger.error(f"❌ Failed to load Sentiment Model: {e}")
 #             self.classifier = None
@@ -159,7 +159,7 @@ class EmbeddingEngine:
         logger.info("⏳ Loading Embedding Model...")
         self.model = SentenceTransformer(EMBEDDING_MODEL_NAME, device='cpu')
         self.model.max_seq_length = 256
-        logger.info("✅ Embedding Model Loaded.")
+        logger.info(" Embedding Model Loaded.")
 
     def clean_text(self, html_text):
         if not html_text: return ""
@@ -253,7 +253,7 @@ def task_sync_reviews(sentiment_engine):
         
         pg_conn.commit()
         print("")
-        logger.info("✅ Reviews synced successfully.")
+        logger.info(" Reviews synced successfully.")
         
         # Update aggregate metrics in user_profiles
         logger.info("Updating user profile review metrics...")
@@ -325,7 +325,7 @@ def task_sync_products(embedding_engine):
                 """, v)
         
         pg_conn.commit()
-        logger.info("✅ Product features & embeddings updated.")
+        logger.info(" Product features & embeddings updated.")
 
     finally:
         mysql_conn.close()
@@ -411,7 +411,7 @@ def task_import_real_interactions():
                 """
                 execute_values(cur, query, interactions_buffer)
             pg_conn.commit()
-            logger.info(f"✅ Imported {len(interactions_buffer)} interactions (Real Purchases + Implied Views).")
+            logger.info(f" Imported {len(interactions_buffer)} interactions (Real Purchases + Implied Views).")
         else:
             logger.warning("⚠️ No real orders found! (Please create orders in MySQL first)")
 
@@ -436,7 +436,7 @@ def task_import_real_interactions():
                 last_purchase_at = EXCLUDED.last_purchase_at
             """)
         pg_conn.commit()
-        logger.info("✅ User profiles updated.")
+        logger.info(" User profiles updated.")
 
     finally:
         mysql_conn.close()

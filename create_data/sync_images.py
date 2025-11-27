@@ -29,7 +29,7 @@ class ImageEmbeddingEngine:
         logger.info("⏳ Loading CLIP Model...")
         # Sử dụng model CLIP đa ngôn ngữ hoặc bản chuẩn
         self.model = SentenceTransformer('clip-ViT-B-32')
-        logger.info("✅ CLIP Model Loaded.")
+        logger.info(" CLIP Model Loaded.")
 
     def image_to_vector(self, image_source):
         """
@@ -134,7 +134,7 @@ def sync_product_images():
             _insert_batch(pg_conn, batch_data)
             total_vectors += len(batch_data)
             
-        logger.info(f"\n✅ DONE! Total vectors created: {total_vectors}")
+        logger.info(f"\n DONE! Total vectors created: {total_vectors}")
         
     finally:
         mysql_conn.close()

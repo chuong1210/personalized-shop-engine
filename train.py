@@ -75,7 +75,7 @@ def train_collaborative_filtering(db: Database, config: dict):
     )
     
     # Get training data with Time Decay logic
-    training_days = cf_config.get('training_days', 90)
+    training_days = cf_config.get('training_days', 30)
     logger.info(f"Loading interaction data from last {training_days} days...")
     
     interaction_data = db.query("""
@@ -87,8 +87,8 @@ def train_collaborative_filtering(db: Database, config: dict):
                 EXP(-EXTRACT(EPOCH FROM (NOW() - created_at)) / (30 * 86400))
             ) as final_score
         FROM user_interactions
-        WHERE created_at >= NOW() - INTERVAL '%s days'
-        AND action_type IN ('view', 'cart_add', 'purchase', 'wishlist')
+      WHERE created_at >= NOW() - INTERVAL '%s days' AND
+         action_type IN ('view', 'cart_add', 'purchase', 'wishlist')
         GROUP BY user_id, product_id
         HAVING SUM(score) > 0
     """, (training_days,))
@@ -368,7 +368,7 @@ def cache_similar_products(cf_engine, cb_engine, db):
         _batch_update_similar(db, updates)
     
     print("") # Xuống dòng
-    logger.info(f"✅ Finished Caching.")
+    logger.info(f" Finished Caching.")
     logger.info(f"   - Used Collaborative Filtering (Behavior): {cf_count}")
     logger.info(f"   - Used Content-Based (Embedding): {cb_count} (Cold Start Fixed)")
 
@@ -417,11 +417,11 @@ def main():
 
     # 2. Train Hybrid (LightFM)
     hybrid_model = None
-    try:
-        hybrid_model = train_hybrid_model(db, config)
-    except Exception:
-        logger.error("Hybrid Training crashed.")
-        traceback.print_exc()
+    # try:
+    #     hybrid_model = train_hybrid_model(db, config)
+    # except Exception:
+    #     logger.error("Hybrid Training crashed.")
+    #     traceback.print_exc()
         
     # 3. Train Content-Based (Optional - Uncomment if needed)
     cb_model = None
