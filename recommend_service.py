@@ -232,15 +232,36 @@ class RecommendationService:
         
         return result
 
-    def _generate_reason(self, pid, uid, cf_dict, trend_dict, search_dict):
-        """Helper sinh lý do gợi ý"""
-        if search_dict.get(pid, 0) > 0:
-            return "Liên quan đến tìm kiếm của bạn"
-        if cf_dict.get(pid, 0) > 0.5: # Ngưỡng cao
-            return "Phù hợp sở thích của bạn"
-        if trend_dict.get(pid, 0) > 0.8:
-            return "Đang dẫn đầu xu hướng"
-        return "Gợi ý cho bạn"
+    def _generate_reason(self, product_id: str, user_id: str, 
+                            cf_dict: Dict, trending_dict: Dict, search_dict: Dict) -> str:
+            """Generate explanation for recommendation (Updated)"""
+            
+            # 1. Ưu tiên lý do Search (Short-term intent)
+            if search_dict.get(product_id, 0) > 0:
+                return "🔍 Liên quan đến tìm kiếm của bạn"
+
+            # 2. Check lý do Trending
+            if product_id in trending_dict and trending_dict[product_id] > 0.8:
+                return "🔥 Đang dẫn đầu xu hướng"
+                
+            # 3. Check lý do CF (Sở thích)
+            if product_id in cf_dict and cf_dict[product_id] > 0.5:
+                return "✨ Phù hợp với sở thích của bạn"
+
+            # 4. Check rating cao (Lý do phụ)
+            product_info = self.db.fetchone("""
+                SELECT avg_rating_updated, review_count FROM product_features 
+                WHERE product_id = %s
+            """, (product_id,))
+            
+            if product_info:
+                avg_rating = float(product_info[0] or 0)
+                review_count = int(product_info[1] or 0)
+                
+                if avg_rating >= 4.8 and review_count >= 10:
+                    return f"⭐ Đánh giá cao ({avg_rating:.1f}/5)"
+            
+            return "Gợi ý cho bạn"
     def get_similar_products(self, product_id: str, n: int = 10) -> List[Dict]:
         """
         Get similar products (Super Hybrid Strategy)
@@ -523,30 +544,7 @@ class RecommendationService:
         
         return list(df.itertuples(index=False, name=None))
     
-    def _generate_reason(self, product_id: str, user_id: str, 
-                        cf_dict: Dict, trending_dict: Dict) -> str:
-        """Generate explanation for recommendation"""
-        
-        # Check if highly rated
-        product_info = self.db.fetchone("""
-            SELECT avg_rating_updated, review_count FROM product_features 
-            WHERE product_id = %s
-        """, (product_id,))
-        
-        if product_info:
-            avg_rating = product_info[0] or 0
-            review_count = product_info[1] or 0
-            
-            if avg_rating >= 4.5 and review_count >= 50:
-                return f"⭐ Highly rated ({avg_rating:.1f}/5 from {review_count} reviews)"
-        
-        if product_id in trending_dict and trending_dict[product_id] > 0.1:
-            return "🔥 Trending now"
-        elif product_id in cf_dict:
-            return "✨ Based on your preferences"
-        else:
-            return "⭐ Popular choice"
-    
+ 
     def _cache_similar_products(self):
         """Pre-compute and cache similar products"""
         logger.info("Caching similar products...")
