@@ -453,3 +453,96 @@ def get_product_stats_detailed(product_id):
     except Exception as e:
         logger.error(f"Product Analytics Error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+    
+# app/routes/analytics.py
+
+@analytics_bp.route('/api/analytics/performance', methods=['GET'])
+def get_recommendation_performance():
+    """
+    Thống kê hiệu quả hệ thống AI (A/B Testing Metric)
+    Hỗ trợ lọc: ?days=30 hoặc ?start_date=...&end_date=...
+    """
+    try:
+        # 1. Lấy khoảng thời gian (Dùng lại hàm helper get_date_range)
+        start_date, end_date = get_date_range(request.args)
+
+        # --- A. Thống kê theo từng Thuật toán (Algorithm Breakdown) ---
+        # Group by rec_type (personalized, similar, cross-sell...)
+        query_algo = """
+            SELECT 
+                rec_type,
+                COUNT(*) as impressions,
+                COUNT(clicked_at) as clicks,
+                COUNT(purchased_at) as orders,
+                COALESCE(SUM(purchase_amount), 0) as revenue
+            FROM recommendation_logs
+            WHERE shown_at BETWEEN %s AND %s
+            GROUP BY rec_type
+            ORDER BY revenue DESC
+        """
+        algo_rows = service.db.query(query_algo, (start_date, end_date))
+
+        # Xử lý số liệu chi tiết cho từng thuật toán
+        algo_stats = []
+        total_summary = {
+            'impressions': 0, 'clicks': 0, 'orders': 0, 'revenue': 0.0
+        }
+
+        for _, row in algo_rows.iterrows():
+            impr = int(row['impressions'])
+            clks = int(row['clicks'])
+            ords = int(row['orders'])
+            rev = float(row['revenue'])
+
+            # Cộng dồn tổng
+            total_summary['impressions'] += impr
+            total_summary['clicks'] += clks
+            total_summary['orders'] += ords
+            total_summary['revenue'] += rev
+
+            algo_stats.append({
+                'algorithm': row['rec_type'],
+                'impressions': impr,
+                'clicks': clks,
+                'orders': ords,
+                'revenue': rev,
+                'ctr': round((clks / impr * 100), 2) if impr > 0 else 0,
+                'conversion_rate': round((ords / clks * 100), 2) if clks > 0 else 0
+            })
+
+        # Tính chỉ số tổng quan toàn hệ thống
+        total_summary['ctr'] = round((total_summary['clicks'] / total_summary['impressions'] * 100), 2) if total_summary['impressions'] > 0 else 0
+        total_summary['conversion_rate'] = round((total_summary['orders'] / total_summary['clicks'] * 100), 2) if total_summary['clicks'] > 0 else 0
+
+        # --- B. Biểu đồ xu hướng (Trend Chart) ---
+        # Để vẽ biểu đồ đường xem hiệu quả theo ngày
+        query_trend = """
+            SELECT 
+                DATE(shown_at) as date,
+                COUNT(*) as impressions,
+                COUNT(clicked_at) as clicks,
+                COALESCE(SUM(purchase_amount), 0) as revenue
+            FROM recommendation_logs
+            WHERE shown_at BETWEEN %s AND %s
+            GROUP BY DATE(shown_at)
+            ORDER BY date ASC
+        """
+        trend_df = service.db.query(query_trend, (start_date, end_date))
+        
+        if not trend_df.empty:
+            trend_df['date'] = trend_df['date'].astype(str)
+
+        return jsonify({
+            'success': True,
+            'period': {
+                'start': str(start_date),
+                'end': str(end_date)
+            },
+            'summary': total_summary,         # Tổng quan (Số to ở trên cùng dashboard)
+            'by_algorithm': algo_stats,       # Bảng so sánh hoặc Pie Chart
+            'trend_chart': trend_df.to_dict('records') # Line chart
+        })
+
+    except Exception as e:
+        logger.error(f"Rec Performance Error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
