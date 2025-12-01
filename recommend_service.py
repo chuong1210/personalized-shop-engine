@@ -191,7 +191,15 @@ class RecommendationService:
         # 6. LỌC NGÂN SÁCH & LẤY INFO CHI TIẾT
         # Lấy profile user
         user_profile = self.db.fetchone("SELECT avg_order_value FROM user_profiles WHERE user_id = %s", (user_id,))
-        avg_spend = float(user_profile[0] or 0)
+        
+                # --- SỬA ĐOẠN NÀY ---
+        if user_profile:
+            avg_spend = float(user_profile[0] or 0)
+        else:
+            # User mới chưa có trong bảng profile -> Mặc định chi tiêu = 0
+            avg_spend = 0
+            
+        # Nếu avg_spend > 0 thì giới hạn gấp 3, ngược lại (user mới) thì không giới hạn (inf)
         max_budget = avg_spend * 3.0 if avg_spend > 0 else float('inf')
 
         candidate_ids = [c['product_id'] for c in candidates]
