@@ -35,7 +35,7 @@ redis:
 # Kafka
 kafka:
   bootstrap_servers:
-    - localhost:9093
+    - kafka:9092
   consumer_group: recommendation-engine
 
 # Model Settings

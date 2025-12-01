@@ -9,6 +9,8 @@ from flask import Blueprint, jsonify, request, send_file
 from app.extensions import service, db, logger
 from datetime import datetime
 import io
+from datetime import datetime, timedelta
+import calendar # Để lấy ngày cuối cùng của tháng
 analytics_bp = Blueprint('analytic', __name__)
 
 @analytics_bp.route('/health', methods=['GET'])
@@ -206,4 +208,248 @@ def export_report():
 
     except Exception as e:
         logger.error(f"Export Error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta # Cần cài: pip install python-dateutil
+
+# Hàm hỗ trợ xử lý ngày tháng (Helper Function)
+def get_date_range(args):
+    """
+    Xử lý các tham số query: days, month, year, start_date/end_date
+    Trả về: (start_date_str, end_date_str)
+    """
+    now = datetime.now()
+    end_date = now
+
+    # 1. Lọc theo khoảng ngày cụ thể (start_date & end_date)
+    if args.get('start_date') and args.get('end_date'):
+        return args.get('start_date'), args.get('end_date')
+
+    # 2. Lọc theo tháng (month=2023-10)
+    if args.get('month'):
+        try:
+            date_obj = datetime.strptime(args.get('month'), '%Y-%m')
+            start_date = date_obj.replace(day=1)
+            # Ngày cuối tháng = ngày đầu tháng + 1 tháng - 1 ngày
+            end_date = start_date + relativedelta(months=1) - timedelta(days=1)
+            return start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')
+        except:
+            pass # Fallback về default
+
+    # 3. Lọc theo năm (year=2024)
+    if args.get('year'):
+        try:
+            year = int(args.get('year'))
+            start_date = datetime(year, 1, 1)
+            end_date = datetime(year, 12, 31)
+            return start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')
+        except:
+            pass
+
+    # 4. Mặc định: Lọc theo số ngày lùi lại (days=7)
+    days = args.get('days', 30, type=int)
+    start_date = now - timedelta(days=days)
+    
+    return start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')
+
+@analytics_bp.route('/api/analytics/shop/<shop_id>', methods=['GET'])
+def get_shop_stats(shop_id):
+    try:
+        # Lấy khoảng thời gian từ helper
+        start_date, end_date = get_date_range(request.args)
+        
+        # --- A. Thống kê tổng quan (Summary) ---
+        # SỬA LỖI: Thêm dấu phẩy sau search_clicks
+        query_stats = """
+            SELECT 
+                COUNT(CASE WHEN action_type = 'view' THEN 1 END) as views,               -- Index 0
+                COUNT(CASE WHEN action_type = 'click' THEN 1 END) as total_clicks,       -- Index 1
+                COUNT(CASE WHEN action_type = 'cart_add' THEN 1 END) as add_to_carts,    -- Index 2
+                COUNT(CASE WHEN action_type = 'purchase' THEN 1 END) as orders,          -- Index 3
+                COUNT(CASE WHEN action_type = 'click' AND metadata->>'source' = 'search' THEN 1 END) as search_clicks, -- Index 4
+                COALESCE(SUM(CASE WHEN action_type = 'purchase' THEN price * quantity ELSE 0 END), 0) as revenue      -- Index 5
+            FROM user_interactions
+            WHERE shop_id = %s
+            AND created_at BETWEEN %s AND %s
+        """
+        stats = service.db.fetchone(query_stats, (shop_id, start_date, end_date))
+        
+        # Xử lý trường hợp shop mới chưa có data (stats là None)
+        if not stats:
+            stats = (0, 0, 0, 0, 0, 0)
+
+        # SỬA LỖI: Mapping đúng index
+        views = int(stats[0] or 0)
+        clicks = int(stats[1] or 0)
+        carts = int(stats[2] or 0)
+        orders = int(stats[3] or 0)
+        search_clicks = int(stats[4] or 0)
+        revenue = float(stats[5] or 0)
+
+        # Tính tỷ lệ chuyển đổi (View -> Order)
+        cv_rate = round((orders / views * 100), 2) if views > 0 else 0
+
+        # --- B. Top sản phẩm ---
+        query_top_products = """
+            SELECT 
+                product_id,
+                COUNT(CASE WHEN action_type = 'view' THEN 1 END) as views,
+                COUNT(CASE WHEN action_type = 'purchase' THEN 1 END) as orders,
+                COALESCE(SUM(CASE WHEN action_type = 'purchase' THEN price * quantity ELSE 0 END), 0) as revenue
+            FROM user_interactions
+            WHERE shop_id = %s
+            AND created_at BETWEEN %s AND %s
+            GROUP BY product_id
+            ORDER BY views DESC
+            LIMIT 10
+        """
+        top_products_df = service.db.query(query_top_products, (shop_id, start_date, end_date))
+
+        # --- C. Biểu đồ xu hướng (Trend Chart) ---
+        query_trend = """
+            SELECT 
+                DATE(created_at) as date,
+                COUNT(CASE WHEN action_type = 'view' THEN 1 END) as views,
+                COUNT(CASE WHEN action_type = 'purchase' THEN 1 END) as orders,
+                COALESCE(SUM(CASE WHEN action_type = 'purchase' THEN price * quantity ELSE 0 END), 0) as revenue
+            FROM user_interactions
+            WHERE shop_id = %s
+            AND created_at BETWEEN %s AND %s
+            GROUP BY DATE(created_at)
+            ORDER BY date ASC
+        """
+        trend_df = service.db.query(query_trend, (shop_id, start_date, end_date))
+
+        if not trend_df.empty:
+            trend_df['date'] = trend_df['date'].astype(str)
+
+        return jsonify({
+            'success': True,
+            'shop_id': shop_id,
+            'period': {
+                'start': str(start_date),
+                'end': str(end_date)
+            },
+            'summary': {
+                'views': views,
+                'total_clicks': clicks,
+                'add_to_carts': carts,
+                'orders': orders,
+                'search_clicks': search_clicks,
+                'revenue': revenue,
+                'conversion_rate': cv_rate
+            },
+            'trend_chart': trend_df.to_dict('records'),
+            'top_products': top_products_df.to_dict('records')
+        })
+
+    except Exception as e:
+        logger.error(f"Shop Analytics Error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# ==============================================================================
+# 4. API THỐNG KÊ SẢN PHẨM (PRODUCT ANALYTICS)
+# ==============================================================================
+# app/routes/analytics.py
+
+@analytics_bp.route('/api/analytics/product/<product_id>', methods=['GET'])
+def get_product_stats_detailed(product_id):
+    """
+    Thống kê chi tiết Product hỗ trợ lọc:
+    - ?days=7
+    - ?start_date=...&end_date=...
+    - ?month=...
+    - ?year=...
+    """
+    try:
+        # 1. Lấy khoảng thời gian (Dùng lại hàm helper đã khai báo ở trên)
+        start_date, end_date = get_date_range(request.args)
+        
+        # 2. Lấy thông tin cơ bản của sản phẩm (Giá hiện tại, Rating, Category)
+        # Để Frontend hiển thị tên/giá bên cạnh biểu đồ
+        query_info = """
+            SELECT category_id, current_price, avg_rating_updated, view_count_30d 
+            FROM product_features 
+            WHERE product_id = %s
+        """
+        prod_info = service.db.fetchone(query_info, (product_id,))
+        
+        # --- A. Thống kê tổng quan (Summary) ---
+        query_stats = """
+            SELECT 
+                COUNT(CASE WHEN action_type = 'view' THEN 1 END) as views,               -- 0
+                COUNT(CASE WHEN action_type = 'click' THEN 1 END) as total_clicks,       -- 1
+                COUNT(CASE WHEN action_type = 'cart_add' THEN 1 END) as add_to_carts,    -- 2
+                COUNT(CASE WHEN action_type = 'purchase' THEN 1 END) as orders,          -- 3
+                COUNT(CASE WHEN action_type = 'click' AND metadata->>'source' = 'search' THEN 1 END) as search_clicks, -- 4
+                COALESCE(SUM(CASE WHEN action_type = 'purchase' THEN price * quantity ELSE 0 END), 0) as revenue      -- 5
+            FROM user_interactions
+            WHERE product_id = %s
+            AND created_at BETWEEN %s AND %s
+        """
+        stats = service.db.fetchone(query_stats, (product_id, start_date, end_date))
+        
+        if not stats:
+            stats = (0, 0, 0, 0, 0, 0)
+
+        views = int(stats[0] or 0)
+        clicks = int(stats[1] or 0)
+        carts = int(stats[2] or 0)
+        orders = int(stats[3] or 0)
+        search_clicks = int(stats[4] or 0)
+        revenue = float(stats[5] or 0)
+
+        # Tính tỷ lệ chuyển đổi
+        ctr = round((clicks / views * 100), 2) if views > 0 else 0
+        cv_rate = round((orders / views * 100), 2) if views > 0 else 0
+        cart_rate = round((carts / views * 100), 2) if views > 0 else 0
+
+        # --- B. Biểu đồ xu hướng (Trend Chart) ---
+        query_trend = """
+            SELECT 
+                DATE(created_at) as date,
+                COUNT(CASE WHEN action_type = 'view' THEN 1 END) as views,
+                COUNT(CASE WHEN action_type = 'cart_add' THEN 1 END) as carts,
+                COUNT(CASE WHEN action_type = 'purchase' THEN 1 END) as orders,
+                COALESCE(SUM(CASE WHEN action_type = 'purchase' THEN price * quantity ELSE 0 END), 0) as revenue
+            FROM user_interactions
+            WHERE product_id = %s
+            AND created_at BETWEEN %s AND %s
+            GROUP BY DATE(created_at)
+            ORDER BY date ASC
+        """
+        trend_df = service.db.query(query_trend, (product_id, start_date, end_date))
+
+        if not trend_df.empty:
+            trend_df['date'] = trend_df['date'].astype(str)
+
+        return jsonify({
+            'success': True,
+            'product_id': product_id,
+            'info': {
+                'category_id': prod_info[0] if prod_info else None,
+                'current_price': float(prod_info[1]) if prod_info else 0,
+                'rating': float(prod_info[2]) if prod_info and prod_info[2] else 0,
+                'total_views_30d': int(prod_info[3]) if prod_info else 0
+            },
+            'period': {
+                'start': str(start_date),
+                'end': str(end_date)
+            },
+            'summary': {
+                'views': views,
+                'total_clicks': clicks,
+                'add_to_carts': carts,
+                'orders': orders,
+                'search_clicks': search_clicks,
+                'revenue': revenue,
+                'ctr': ctr,                 # Tỷ lệ click xem
+                'cart_rate': cart_rate,     # Tỷ lệ thêm giỏ
+                'conversion_rate': cv_rate  # Tỷ lệ mua hàng
+            },
+            'trend_chart': trend_df.to_dict('records')
+        })
+
+    except Exception as e:
+        logger.error(f"Product Analytics Error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500

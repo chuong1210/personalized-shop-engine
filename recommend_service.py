@@ -70,7 +70,6 @@ class RecommendationService:
             
             # Load embeddings đã train trước đó từ file .pkl (Nếu có)
             # Giúp tìm kiếm nhanh hơn mà không cần query DB
-            import os
             cb_path = "models/cb_embeddings_latest.pkl"
             if os.path.exists(cb_path):
                 self.cb_engine.load_embeddings(cb_path)
@@ -118,118 +117,138 @@ class RecommendationService:
         
         logger.info("CF model training completed")
     
-    def get_personalized_recommendations(
-        self, 
-        user_id: str, 
-        n: int = 20,
-        context: Optional[Dict] = None
-    ) -> List[Dict]:
-        """
-        Get personalized recommendations for a user
-        
-        Combines:
-        - Collaborative filtering (70%)
-        - Trending products (20%)
-        - Popular in user's favorite categories (10%)
-        
-        Args:
-            user_id: User ID
-            n: Number of recommendations
-            context: Additional context (page, device, etc.)
+    def _normalize_scores(self, data_dict):
+            """Helper: Chuẩn hóa điểm số về khoảng 0-1"""
+            if not data_dict:
+                return {}
             
-        Returns:
-            List of recommendation dictionaries with product_id, score, reason
-        """
-        # Check cache
-        cache_key = f"rec:personalized:{user_id}"
-        # cached = self.redis.get(cache_key)
-        # if cached:
-        #     logger.debug(f"Cache hit for user {user_id}")
-        #     return json.loads(cached)
-        
-        # logger.info(f"Generating personalized recommendations for user {user_id}")
-        
-        # 1. Collaborative Filtering (70%)
-        cf_recs = self.cf_engine.recommend(user_id, n=n*2)
-        cf_dict = {pid: score * self.weights['collaborative'] for pid, score in cf_recs}
-        
-        print("cf",cf_dict)
-        # 2. Trending products (20%)
-        trending = self._get_trending_products(n=20)
-        trending_dict = {pid: score * self.weights['trending'] for pid, score in trending}
-        print("trending",trending_dict)
-        
-        # 3. Popular in favorite categories (10%)
-        popular = self._get_popular_in_user_categories(user_id, n=20)
-        popular_dict = {pid: score * self.weights['popular'] for pid, score in popular}
-        print("popular",popular_dict)
+            max_score = max(data_dict.values())
+            if max_score == 0:
+                return data_dict
+                
+            return {pid: score / max_score for pid, score in data_dict.items()}
 
-        # Combine scores
-        all_products = set(cf_dict.keys()) | set(trending_dict.keys()) | set(popular_dict.keys())
+    def get_personalized_recommendations(self, user_id, n=20, context=None):
+        # 0. Check Cache (Bật lại khi chạy thật)
+        # cache_key = f"rec:personalized:{user_id}"
+        # cached = self.redis.get(cache_key)
+        # if cached: return json.loads(cached)
+
+        # 1. NGUỒN: Collaborative Filtering (70%)
+        # Lấy nhiều hơn N để còn lọc
+        cf_recs = self.cf_engine.recommend(user_id, n=n*3) 
+        cf_raw = {pid: score for pid, score in cf_recs}
+        cf_norm = self._normalize_scores(cf_raw) # Chuẩn hóa về 0-1
+        
+        # 2. NGUỒN: Search History (Redis) - Boost điểm
+        search_bonus = {}
+        last_query = self.redis.get(f"user:{user_id}:last_search")
+        if last_query:
+            # Tìm 10 sp liên quan từ khóa, gán điểm max (1.0)
+            search_items = self.cb_engine.search(last_query, n=10)
+            for pid, _ in search_items:
+                search_bonus[pid] = 1.0 # Bonus 1.0 điểm
+        
+        # 3. NGUỒN: Trending (20%)
+        trending = self._get_trending_products(n=50)
+        trending_raw = {pid: score for pid, score in trending}
+        trending_norm = self._normalize_scores(trending_raw) # Chuẩn hóa về 0-1
+        
+        # 4. NGUỒN: Popular in Category (10%)
+        popular = self._get_popular_in_user_categories(user_id, n=50)
+        popular_raw = {pid: score for pid, score in popular}
+        popular_norm = self._normalize_scores(popular_raw) # Chuẩn hóa về 0-1
+
+        # 5. TỔNG HỢP ĐIỂM (Hybrid)
+        all_products = set(cf_norm.keys()) | set(trending_norm.keys()) | set(popular_norm.keys()) | set(search_bonus.keys())
         combined = []
         
+        # Trọng số
+        W_CF = 0.6      # Giảm chút để nhường cho Search
+        W_TREND = 0.2
+        W_POP = 0.1
+        W_SEARCH = 0.1  # Trọng số cho search
+        
         for pid in all_products:
+            # Công thức Hybrid chuẩn hóa
             total_score = (
-                cf_dict.get(pid, 0) + 
-                trending_dict.get(pid, 0) + 
-                popular_dict.get(pid, 0)
+                cf_norm.get(pid, 0) * W_CF +
+                trending_norm.get(pid, 0) * W_TREND +
+                popular_norm.get(pid, 0) * W_POP +
+                search_bonus.get(pid, 0) * W_SEARCH
             )
             
             combined.append({
                 'product_id': pid,
                 'score': float(total_score),
-                'reason': self._generate_reason(pid, user_id, cf_dict, trending_dict)
+                'reason': self._generate_reason(pid, user_id, cf_norm, trending_norm, search_bonus)
             })
-        
-        # Sort by score and get top N
-        combined.sort(key=lambda x: x['score'], reverse=True)
-        result = combined[:n]
-        
-        # Cache for 1 hour
-        # cache_ttl = self.config.get('recommendation', {}).get('cache_ttl', 3600)
-        # self.redis.setex(cache_key, cache_ttl, json.dumps(result))
-        
-        # Log impressions
-        self._log_impressions(user_id, result, 'personalized', context)
-        
-        logger.info(f"Generated {len(result)} recommendations for user {user_id}")
-        return result
-    
-    def get_similar_products(self, product_id: str, n: int = 10) -> List[Dict]:
-        """
-        Get similar products
-        
-        Args:
-            product_id: Product ID
-            n: Number of similar products
             
-        Returns:
-            List of similar product dictionaries
+        # Sort tạm để lấy Top đầu ứng viên
+        combined.sort(key=lambda x: x['score'], reverse=True)
+        candidates = combined[:n*3] # Lấy top 60 để lọc giá
+        
+        # 6. LỌC NGÂN SÁCH & LẤY INFO CHI TIẾT
+        # Lấy profile user
+        user_profile = self.db.fetchone("SELECT avg_order_value FROM user_profiles WHERE user_id = %s", (user_id,))
+        avg_spend = float(user_profile[0] or 0)
+        max_budget = avg_spend * 3.0 if avg_spend > 0 else float('inf')
+
+        candidate_ids = [c['product_id'] for c in candidates]
+        
+        if not candidate_ids: 
+            return []
+
+        # Query DB để lấy giá, tên, ảnh và filter giá luôn
+        placeholders = ','.join(['%s'] * len(candidate_ids))
+        query = f"""
+            SELECT product_id, current_price, avg_rating_updated
+            FROM product_features
+            WHERE product_id IN ({placeholders})
+            AND current_price <= %s
         """
-        # Try from cache first
-        cached_similar = self.db.fetchone("""
-            SELECT similar_product_ids 
-            FROM product_features 
-            WHERE product_id = %s
-        """, (product_id,))
         
-        if cached_similar and cached_similar[0]:
-            similar_ids = cached_similar[0][:n]
-            result = [{'product_id': pid, 'score': 1.0 - i*0.05} for i, pid in enumerate(similar_ids)]
-        else:
-            # Compute using CF model
-            similar = self.cf_engine.similar_products(product_id, n)
-            result = [{'product_id': pid, 'score': score} for pid, score in similar]
+        rows = self.db.query(query, tuple(candidate_ids) + (max_budget,))
         
-        self._log_impressions('anonymous', result, 'similar', {'source_product': product_id})
+        # 7. FORMAT KẾT QUẢ CUỐI CÙNG
+        final_results = []
+        for item in candidates:
+            # Tìm thông tin trong DB result
+            prod_info = rows[rows['product_id'] == item['product_id']]
+            if not prod_info.empty:
+                price = float(prod_info.iloc[0]['current_price'])
+                rating = float(prod_info.iloc[0]['avg_rating_updated'] or 0)
+                
+                item['price'] = price
+                item['rating'] = rating
+                final_results.append(item)
+                
+        # Cắt lấy đúng N sản phẩm
+        result = final_results[:n]
+        
+        # Log & Cache
+        self._log_impressions(user_id, result, 'personalized', context)
+        # self.redis.setex(cache_key, 3600, json.dumps(result))
         
         return result
-    
+
+    def _generate_reason(self, pid, uid, cf_dict, trend_dict, search_dict):
+        """Helper sinh lý do gợi ý"""
+        if search_dict.get(pid, 0) > 0:
+            return "Liên quan đến tìm kiếm của bạn"
+        if cf_dict.get(pid, 0) > 0.5: # Ngưỡng cao
+            return "Phù hợp sở thích của bạn"
+        if trend_dict.get(pid, 0) > 0.8:
+            return "Đang dẫn đầu xu hướng"
+        return "Gợi ý cho bạn"
     def get_similar_products(self, product_id: str, n: int = 10) -> List[Dict]:
         """
-        Get similar products (Hybrid: DB Cache -> CF -> Content-Based)
+        Get similar products (Super Hybrid Strategy)
+        Priority: DB Cache -> CF Engine (RAM) -> Content-Based (Vector DB) -> Category
         """
-        # 1. Thử lấy từ Cache Database (Nhanh nhất)
+        # ---------------------------------------------------------
+        # 1. Ưu tiên 1: Lấy từ Cache Database (Kết quả của lần train trước)
+        # ---------------------------------------------------------
         cached_similar = self.db.fetchone("""
             SELECT similar_product_ids 
             FROM product_features 
@@ -237,13 +256,32 @@ class RecommendationService:
         """, (product_id,))
         
         if cached_similar and cached_similar[0]:
+            # Nếu có cache, trả về ngay
             similar_ids = cached_similar[0][:n]
-            # Lấy thêm thông tin giá/ảnh để hiển thị
-            return self._fetch_product_details(similar_ids, reason="Similar (Cache)")
+            results = self._fetch_product_details(similar_ids, reason="Similar (Cache/Behavior)")
+            self._log_impressions('anonymous', results, 'similar', {'source': product_id})
+            return results
 
-        # 2. Nếu Cache rỗng -> Dùng Content-Based (Vector Search)
-        # Đây là cứu cánh cho sản phẩm mới (Cold Start)
-        logger.info(f"Cache miss for {product_id}. Using Vector Search...")
+        # ---------------------------------------------------------
+        # 2. Ưu tiên 2: Thử hỏi CF Engine (Trong RAM)
+        # ---------------------------------------------------------
+        # Dành cho trường hợp mới train xong nhưng chưa kịp sync vào DB
+        # try:
+        #     cf_sim = self.cf_engine.similar_products(product_id, n)
+        #     if cf_sim:
+        #         logger.info(f"CF Hit for {product_id}")
+        #         results = [{'product_id': pid, 'score': score, 'reason': 'Similar (Behavior)'} 
+        #                    for pid, score in cf_sim]
+        #         self._log_impressions('anonymous', results, 'similar', {'source': product_id})
+        #         return results
+        # except Exception:
+        #     pass # CF fail thì đi tiếp, không báo lỗi
+
+        # ---------------------------------------------------------
+        # 3. Ưu tiên 3: Dùng Content-Based (Vector Search trong DB)
+        # ---------------------------------------------------------
+        # Cứu cánh cho sản phẩm mới (Cold Start)
+        logger.info(f"Cache & CF miss for {product_id}. Switching to Vector Search...")
         
         try:
             # Lấy vector của sản phẩm hiện tại
@@ -252,10 +290,9 @@ class RecommendationService:
             """, (product_id,))
             
             if query_vec and query_vec[0]:
-                vector_str = query_vec[0] # PostgreSQL vector trả về string hoặc list
+                vector_str = query_vec[0]
                 
-                # Tìm kiếm bằng pgvector (Cosine Distance)
-                # Toán tử <=> là khoảng cách cosine
+                # Tìm kiếm bằng pgvector
                 similar_rows = self.db.query("""
                     SELECT product_id, 1 - (text_embedding <=> %s) as score
                     FROM product_features
@@ -270,29 +307,40 @@ class RecommendationService:
                     results.append({
                         'product_id': row['product_id'],
                         'score': float(row['score']),
-                        'reason': 'Content Similarity'
+                        'reason': 'Similar (Content)'
                     })
-                return results
+                
+                if results:
+                    self._log_impressions('anonymous', results, 'similar', {'source': product_id})
+                    return results
                 
         except Exception as e:
             logger.error(f"Vector search failed: {e}")
 
-        # 3. Fallback cuối cùng: Trả về sản phẩm cùng danh mục
+        # ---------------------------------------------------------
+        # 4. Ưu tiên 4: Fallback về cùng Danh Mục (Category)
+        # ---------------------------------------------------------
+        # Lưới an toàn cuối cùng nếu sản phẩm chưa có cả vector
         logger.info("Vector search failed. Fallback to Category.")
         cat_products = self.db.query("""
             SELECT t1.product_id 
             FROM product_features t1
             JOIN product_features t2 ON t1.category_id = t2.category_id
             WHERE t2.product_id = %s AND t1.product_id != %s
+            ORDER BY t1.view_count_30d DESC
             LIMIT %s
         """, (product_id, product_id, n))
         
-        return [{'product_id': r['product_id'], 'score': 0.1, 'reason': 'Same Category'} 
-                for _, r in cat_products.iterrows()]
+        results = [{'product_id': r['product_id'], 'score': 0.1, 'reason': 'Same Category'} 
+                   for _, r in cat_products.iterrows()]
+        
+        return results
 
     def _fetch_product_details(self, product_ids, reason=""):
-        """Helper để format kết quả trả về"""
-        return [{'product_id': pid, 'score': 0.9, 'reason': reason} for pid in product_ids]
+        """Helper để format kết quả trả về đồng nhất"""
+        # Ở đây bạn có thể query thêm giá/ảnh nếu cần, hiện tại trả về ID là đủ
+        return [{'product_id': pid, 'score': 0.9 - (i*0.01), 'reason': reason} 
+                for i, pid in enumerate(product_ids)]
     def get_cross_sell(self, product_ids: List[str], n: int = 5) -> List[Dict]:
         """
         Get cross-sell recommendations (frequently bought together)

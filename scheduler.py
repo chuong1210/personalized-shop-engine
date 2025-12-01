@@ -55,7 +55,7 @@ def main():
     service = RecommendationService(db, redis_client, config)
     
     # Initialize batch jobs
-    batch_jobs = BatchJobs(db, service)
+    batch_jobs = BatchJobs(db, service, config=config)
     
     # Get schedule config
     schedule_config = config.get('schedule', {})
@@ -70,7 +70,8 @@ def main():
         batch_jobs.update_product_metrics
     )
     logger.info(f"Scheduled: Update product metrics daily at {update_metrics_time}")
-    
+    schedule.every(60).minutes.do(batch_jobs.update_user_spending_stats)
+    logger.info("Scheduled: Update user spending stats every 60 mins")
     # Update user profiles (daily at 3:00 AM)
     update_profiles_time = schedule_config.get('update_profiles', '03:00')
     schedule.every().day.at(update_profiles_time).do(

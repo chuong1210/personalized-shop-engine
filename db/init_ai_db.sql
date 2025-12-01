@@ -148,6 +148,24 @@ CREATE TABLE product_image_embeddings (
 -- 2. Tạo Index để tìm kiếm nhanh
 CREATE INDEX idx_img_embed ON product_image_embeddings USING ivfflat (embedding vector_cosine_ops);
 CREATE INDEX idx_img_pid ON product_image_embeddings (product_id);
+
+
+UPDATE user_interactions
+SET created_at = NOW() - (random() * INTERVAL '30 days');
+
+-- "Bơm" dữ liệu Trending
+UPDATE product_features 
+SET 
+    trending_score = floor(random() * 100) + 1,
+    view_count_7d = floor(random() * 500),
+    review_count = floor(random() * 50),
+    avg_rating_updated = 4.5
+WHERE trending_score IS NULL OR trending_score = 0;
+-- SELECT * FROM product_features WHERE product_id=74500335;
+SELECT user_id, action_type, created_at, NOW() - created_at as age
+FROM user_interactions 
+WHERE user_id = '11810269'
+AND created_at >= NOW() - INTERVAL '365 days';
 -- =========================================================================
 -- HELPER FUNCTIONS
 -- =========================================================================
